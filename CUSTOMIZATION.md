@@ -1,40 +1,137 @@
-# Mailcow Customization & Branding Guide
+# Sender Identity & Outgoing Mail Branding Guide
 
-This document outlines the safe paths for branding and identity work in this fork.
+This document covers real sender identity infrastructure for `scenarix.online`.
 
-## Branding Boundary
+> [!IMPORTANT]
+> **Uploading a logo in any app does NOT make it appear in Gmail or other inbox clients.**
+> Real sender logo/profile display in email clients requires domain-level infrastructure.
+> This guide documents only that real path.
 
-To maintain a clean sync path with upstream, follow these rules for customizations:
+---
 
-### 1. Logo and UI Branding
-- **Custom Logos**: Place your custom logos in `data/conf/sogo/`.
-    - `custom-fulllogo.svg` / `custom-fulllogo.png`
-    - `custom-shortlogo.svg`
-- **Custom CSS**: Use `data/web/css/build/0081-custom-mailcow.css` for UI overrides. This file is ignored by git in the default configuration to prevent server-specific UI drift from entering the fork unless explicitly tracked.
+## What Controls Sender Logo / Profile Photo in Email Clients?
 
-### 2. Postfix & Dovecot Overrides
-- **Postfix**: Use `data/conf/postfix/main.cf.local`. This is where server-specific hostnames and DNSBL settings should live.
-- **Dovecot**: Use `data/conf/dovecot/extra.conf`.
+Sender logo/avatar display (e.g., in Gmail) is controlled at the **domain and DNS level**, not at the mail app level.
 
-### 3. BIMI and Sender Identity
-- **VMC Certificates**: Should be placed in `data/assets/ssl/` if used for the main identity, or a custom subdirectory. Ensure they are NOT tracked in git.
-- **BIMI Logo**: Should be a square SVG (Tiny 1.2 profile) hosted on a public URL. You can place the source SVG in `data/web/branding/` (new directory) to track it in your fork.
+The supported standards are:
 
-### 4. SSL Certificates
-- Certificates are managed by Certbot and synced via `/etc/letsencrypt/renewal-hooks/deploy/mailcow-sync.sh`.
-- Do NOT commit certificates to the repository.
+| Standard | What it does |
+| :--- | :--- |
+| **SPF** | Verifies the sending server is authorized |
+| **DKIM** | Cryptographically signs each outgoing message |
+| **DMARC** | Tells receivers what to do if SPF/DKIM fail |
+| **BIMI** | Points email clients to a verified sender logo |
+
+All four must be correctly configured before sender logo display is possible in any client.
+
+---
+
+## Current Status: `scenarix.online`
+
+### SPF
+- **Record present**: `v=spf1 mx a -all`
+- **Status**: ✅ Basic SPF in place. The `-all` hard-fail policy is good.
+
+### DKIM
+- **Status**: ⚠️ No public DKIM DNS record found at common selectors (`mail`, `dkim`, `s1`, `default`).
+- **Action Required**: Generate a DKIM key in Mailcow admin → Domains → Edit → DKIM, then publish the given TXT record to DNS.
+
+### DMARC
+- **Status**: ❌ No DMARC record found at `_dmarc.scenarix.online`.
+- **Action Required**: Add a DMARC TXT record. Start with `p=none` for monitoring, then tighten.
+- **BIMI Requires**: `p=quarantine` or `p=reject` with `pct=100`.
+
+### BIMI
+- **Status**: ❌ No BIMI record found at `default._bimi.scenarix.online`.
+- **Action Required**: All of the above must be done first. See steps below.
+
+---
+
+## Step-by-Step: Real Sender Logo Readiness
+
+### Step 1 — Ensure DKIM is generated and published
+
+1. Go to Mailcow admin → Configuration → Domains → `scenarix.online` → Edit
+2. Under **DKIM**, generate a key (2048-bit recommended)
+3. Copy the public key shown
+4. Add this DNS TXT record (the selector name is shown in Mailcow, e.g. `dkim`):
+   ```
+   dkim._domainkey.scenarix.online  TXT  "v=DKIM1; k=rsa; p=<your-public-key>"
+   ```
+5. Verify: `dig TXT dkim._domainkey.scenarix.online`
+
+### Step 2 — Add DMARC record
+
+Start in monitoring/reporting mode:
+```
+_dmarc.scenarix.online  TXT  "v=DMARC1; p=none; rua=mailto:admin@scenarix.online"
+```
+
+Once you confirm Mailcow is passing DKIM+SPF cleanly (check the rua reports), upgrade to:
+```
+_dmarc.scenarix.online  TXT  "v=DMARC1; p=quarantine; pct=100; rua=mailto:admin@scenarix.online"
+```
+
+> [!IMPORTANT]
+> BIMI **requires** `p=quarantine` or `p=reject`. The `p=none` policy will not activate BIMI.
+
+### Step 3 — Prepare a BIMI-compliant logo
+
+Requirements:
+- Square SVG, **Tiny 1.2 profile** (not regular SVG)
+- Hosted at a stable public HTTPS URL
+- Convert your logo before use: https://bimigroup.org/svg-conversion-tools/
+- Place the source file for tracking at `data/web/branding/bimi-logo-source.svg`
+
+### Step 4 — Add the BIMI DNS record (no VMC required for basic support)
+
+```
+default._bimi.scenarix.online  TXT  "v=BIMI1; l=https://scenarix.online/bimi/logo.svg"
+```
+
+Host your SVG at that public HTTPS path (e.g., via Nginx or any CDN).
+
+To also get the **blue verified checkmark** in Gmail, you need a **VMC (Verified Mark Certificate)** — this is a paid certificate from an approved CA (DigiCert, Entrust). Add the `a=` authority field:
+```
+"v=BIMI1; l=https://scenarix.online/bimi/logo.svg; a=https://scenarix.online/bimi/vmc.pem"
+```
+
+### Step 5 — Verify
+
+- https://bimigroup.org/bimi-generator/ — Check BIMI readiness
+- https://dmarcian.com/dmarc-inspector/ — Check DMARC
+- https://dkimvalidator.com/ — Send a test email to validate DKIM signing
+
+---
+
+## What Does NOT Control Inbox Sender Logo
+
+- Uploading a logo in Mailcow UI admin → this only changes the Mailcow **web interface** logo
+- Any app-side "sender photo" setting
+- Redis `MAIN_LOGO` key — this controls the Mailcow admin panel header only
+
+Do not confuse Mailcow UI branding with outgoing sender identity.
+
+---
 
 ## Upstream Sync Workflow
 
-To keep this fork aligned with Mailcow official:
-1. `git fetch upstream`
-2. `git merge upstream/master`
-3. Resolve conflicts (preferring upstream for core files, and keeping your `.local` files).
+To keep this fork aligned with upstream Mailcow:
+```bash
+git fetch upstream
+git merge upstream/master
+```
 
-## Tracked vs. Local
-| File Type | Tracked in Fork? | Location |
-| :--- | :--- | :--- |
-| Core Logic | Yes | `data/web/inc/...` |
-| Safe Templates | Yes | `data/web/templates/...` |
-| Server Secrets | **NO** | `mailcow.conf`, `*.pem` |
-| Local Overrides | Optional | `*.local` |
+Resolve conflicts preserving your `.local` files and this guide.
+
+---
+
+## Postfix Local Overrides
+
+Your server-specific Postfix settings (DNSBL, myhostname) are in:
+```
+data/conf/postfix/main.cf.local
+```
+
+This file stays **local only** (untracked) and is not committed to the fork.
+It is not overwritten by Mailcow updates.
